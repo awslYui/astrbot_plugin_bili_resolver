@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from pathlib import PurePosixPath
 from typing import List, Optional, Set, Union
 
-from aiohttp import ClientSession, ClientTimeout
+from curl_cffi.requests import AsyncSession
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
@@ -27,13 +27,11 @@ TEMPLATE_PRESET_EMOJI = (
 )
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
     "Referer": "https://www.bilibili.com/",
     "Accept-Language": "zh-CN,zh;q=0.9",
 }
 
-DEFAULT_TIMEOUT = ClientTimeout(total=15)
+DEFAULT_TIMEOUT_SECONDS = 15
 DEFAULT_RISK_COOLDOWN_SECONDS = 30 * 60
 DEFAULT_REQUEST_INTERVAL_SECONDS = 1.5
 
@@ -226,7 +224,7 @@ def _format_msg(msg_list: List[Union[List[str], str]]) -> list:
     "bilibili小组件等转链的工具,方便PC查看链接,"
     "因为之前用其他的转链总是被踢下线,所以自己写了个简单版的,"
     "从发布以来还没被踢下线",
-    "1.1.0",
+    "1.2.0",
     "https://github.com/awslYui/astrbot_plugin_bili_resolver",
 )
 class BilibiliAnalysis(Star):
@@ -234,15 +232,11 @@ class BilibiliAnalysis(Star):
     def __init__(self, context: Context, config: dict):
         super().__init__(context)
         self.config = config
-        self.trust_env = False
-        self._session: Optional[ClientSession] = None
-        self._session_bootstrapped = False
-        self._bootstrap_lock = asyncio.Lock()
+        self._session: Optional[AsyncSession] = None
         self._request_lock = asyncio.Lock()
         self._last_request_at = 0.0
         self._risk_control_until = 0.0
 
-        self.bili_sessdata = str(config.get("bili_sessdata", "")).strip()
         self.risk_cooldown_seconds = max(
             60,
             int(config.get(
@@ -280,39 +274,16 @@ class BilibiliAnalysis(Star):
         self.group_whitelist_mode = config.get("group_whitelist_mode", False)
         self.group_list = [str(g) for g in config.get("group_list", [])]
 
-    async def _get_session(self) -> ClientSession:
-        """懒初始化并复用 ClientSession"""
-        if self._session is None or self._session.closed:
-            cookies = (
-                {"SESSDATA": self.bili_sessdata}
-                if self.bili_sessdata
-                else None
-            )
-            self._session = ClientSession(
-                trust_env=self.trust_env,
+    async def _get_session(self) -> AsyncSession:
+        """懒初始化并复用匿名浏览器指纹会话。"""
+        if self._session is None:
+            self._session = AsyncSession(
                 headers=HEADERS,
-                cookies=cookies,
-                timeout=DEFAULT_TIMEOUT,
+                timeout=DEFAULT_TIMEOUT_SECONDS,
+                impersonate="chrome",
+                discard_cookies=True,
             )
         return self._session
-
-    async def _bootstrap_session(self, session: ClientSession) -> None:
-        """Visit the main site once so anonymous sessions receive cookies."""
-        if self._session_bootstrapped:
-            return
-        async with self._bootstrap_lock:
-            if self._session_bootstrapped:
-                return
-            async with session.get("https://www.bilibili.com/") as resp:
-                if resp.status == 412:
-                    raise BiliRiskControlError(str(resp.url))
-                await resp.read()
-                if resp.status >= 400:
-                    logger.warning(
-                        "Bilibili session bootstrap returned HTTP "
-                        f"{resp.status}"
-                    )
-            self._session_bootstrapped = True
 
     def _risk_cooldown_remaining(self) -> int:
         now = asyncio.get_running_loop().time()
@@ -348,7 +319,6 @@ class BilibiliAnalysis(Star):
             return None
         async with self._request_slot():
             session = await self._get_session()
-            await self._bootstrap_session(session)
             if re.search(
                 r"(b23\.tv)|(bili(22|23|33|2233)\.cn)", text, re.I
             ):
@@ -474,7 +444,6 @@ class BilibiliAnalysis(Star):
         try:
             async with self._request_slot():
                 session = await self._get_session()
-                await self._bootstrap_session(session)
                 search_url = await search_bili_by_title(
                     text, session=session
                 )
@@ -512,7 +481,6 @@ class BilibiliAnalysis(Star):
 
     async def terminate(self):
         """插件被卸载/停用时调用，关闭持久化 session"""
-        if self._session and not self._session.closed:
+        if self._session:
             await self._session.close()
             self._session = None
-        self._session_bootstrapped = False

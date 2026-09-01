@@ -4,7 +4,7 @@ from functools import reduce
 from hashlib import md5
 from typing import Dict, Optional, Tuple
 
-from aiohttp import ClientSession
+from curl_cffi.requests import AsyncSession
 
 from .errors import BiliRiskControlError, raise_for_risk_control_payload
 
@@ -20,9 +20,8 @@ MIXIN_KEY_ENC_TAB = [
 # fmt: on
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Referer": "https://www.bilibili.com",
+    "Referer": "https://www.bilibili.com/",
+    "Accept-Language": "zh-CN,zh;q=0.9",
 }
 
 # WBI key cache: (img_key, sub_key, timestamp)
@@ -53,7 +52,7 @@ def enc_wbi(params: dict, img_key: str, sub_key: str) -> Dict[str, str]:
 
 
 async def get_wbi_keys(
-    session: Optional[ClientSession] = None,
+    session: Optional[AsyncSession] = None,
 ) -> Tuple[str, str]:
     """获取最新的 img_key 和 sub_key，带 30 分钟缓存"""
     global _wbi_key_cache
@@ -66,20 +65,25 @@ async def get_wbi_keys(
 
     owns_session = session is None
     if owns_session:
-        session = ClientSession(headers=HEADERS)
+        session = AsyncSession(
+            headers=HEADERS,
+            timeout=15,
+            impersonate="chrome",
+            discard_cookies=True,
+        )
     try:
-        async with session.get(
+        resp = await session.get(
             "https://api.bilibili.com/x/web-interface/nav",
             timeout=15,
-        ) as resp:
-            if resp.status == 412:
-                raise BiliRiskControlError(str(resp.url))
-            if resp.status != 200:
-                raise RuntimeError(
-                    f"WBI nav request failed with status {resp.status}"
-                )
-            json_content = await resp.json()
-            raise_for_risk_control_payload(json_content, str(resp.url))
+        )
+        if resp.status_code == 412:
+            raise BiliRiskControlError(str(resp.url))
+        if resp.status_code != 200:
+            raise RuntimeError(
+                f"WBI nav request failed with status {resp.status_code}"
+            )
+        json_content = resp.json()
+        raise_for_risk_control_payload(json_content, str(resp.url))
     finally:
         if owns_session:
             await session.close()
@@ -95,7 +99,7 @@ async def get_wbi_keys(
 
 async def get_query(
     params: dict,
-    session: Optional[ClientSession] = None,
+    session: Optional[AsyncSession] = None,
 ) -> str:
     """获取签名后的查询参数"""
     img_key, sub_key = await get_wbi_keys(session=session)

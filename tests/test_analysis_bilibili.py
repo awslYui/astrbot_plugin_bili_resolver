@@ -26,18 +26,12 @@ from bilijiexi.errors import BiliRiskControlError  # noqa: E402
 
 class _Response:
     def __init__(self, status=200, payload=None, url="https://api.bilibili.com/test"):
-        self.status = status
+        self.status_code = status
         self._payload = payload or {}
         self.url = url
         self.headers = {}
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *_args):
-        return False
-
-    async def json(self):
+    def json(self):
         return self._payload
 
 
@@ -45,11 +39,21 @@ class _Session:
     def __init__(self, response):
         self.response = response
 
-    def get(self, *_args, **_kwargs):
+    async def get(self, *_args, **_kwargs):
         return self.response
 
 
 class AnalysisTests(unittest.IsolatedAsyncioTestCase):
+    async def test_video_extract_uses_anonymous_wbi_endpoint(self):
+        url, _page, _time_location = analysis_bilibili.extract(
+            "BV1gNtP6aEM4"
+        )
+        self.assertEqual(
+            url,
+            "https://api.bilibili.com/x/web-interface/wbi/view"
+            "?bvid=BV1gNtP6aEM4",
+        )
+
     async def test_video_description_is_not_truncated(self):
         description = "第一行\n第二行\n第三行\n第四行\n第五行"
         payload = {
@@ -82,7 +86,7 @@ class AnalysisTests(unittest.IsolatedAsyncioTestCase):
             analysis_bilibili.analysis_display_image = False
             analysis_bilibili.analysis_video_template = ""
             message, _ = await analysis_bilibili.video_detail(
-                "https://api.bilibili.com/x/web-interface/view?aid=123",
+                "https://api.bilibili.com/x/web-interface/wbi/view?aid=123",
                 session=_Session(_Response(payload=payload)),
             )
         finally:
@@ -95,14 +99,14 @@ class AnalysisTests(unittest.IsolatedAsyncioTestCase):
     async def test_video_http_412_is_propagated(self):
         with self.assertRaises(BiliRiskControlError):
             await analysis_bilibili.video_detail(
-                "https://api.bilibili.com/x/web-interface/view?aid=123",
+                "https://api.bilibili.com/x/web-interface/wbi/view?aid=123",
                 session=_Session(_Response(status=412)),
             )
 
     async def test_video_json_minus_412_is_propagated(self):
         with self.assertRaises(BiliRiskControlError):
             await analysis_bilibili.video_detail(
-                "https://api.bilibili.com/x/web-interface/view?aid=123",
+                "https://api.bilibili.com/x/web-interface/wbi/view?aid=123",
                 session=_Session(
                     _Response(payload={"code": -412, "message": "请求被拦截"})
                 ),

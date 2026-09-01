@@ -1,5 +1,12 @@
 # 更新日志
 
+## v1.2.0
+
+- 视频详情从被风控的 `/x/web-interface/view` 切换至匿名可用的 `/x/web-interface/wbi/view`
+- 使用 `curl_cffi` 模拟 Chrome 的 TLS/JA3、HTTP/2 与请求头指纹，修复同一 IP 下浏览器正常但脚本请求 HTTP 412 的问题
+- 完全移除 `SESSDATA` 和登录 Cookie 配置，并丢弃服务端下发的匿名 Cookie
+- 保留请求限速、412 冷却熔断和完整视频简介
+
 ## v1.1.0
 
 - 修复 B 站 HTTP 412 风控后持续重复请求的问题

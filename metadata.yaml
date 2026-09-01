@@ -1,6 +1,6 @@
 name: astrbot_plugin_bili_resolver
 author: chufeng & awslYui
-description: Bilibili 链接解析工具（HTTP 412 风控修复版），支持可选登录态、请求限流、风控熔断和完整视频简介
-version: 1.1.0
+description: Bilibili 链接解析工具（匿名 HTTP 412 风控修复版），支持浏览器指纹请求、限流、风控熔断和完整视频简介
+version: 1.2.0
 repo: https://github.com/awslYui/astrbot_plugin_bili_resolver
-display_name: Bilibili 解析（412修复版）
+display_name: Bilibili 解析（匿名风控修复版）

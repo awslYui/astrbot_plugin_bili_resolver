@@ -14,12 +14,6 @@
     "type": "bool",
     "default": true
   },
-  "bili_sessdata": {
-    "description": "B站登录 Cookie 中的 SESSDATA（可选，建议使用专用小号）",
-    "type": "text",
-    "default": "",
-    "hint": "用于降低匿名请求触发 HTTP 412 风控的概率。SESSDATA 等同登录凭据，请勿分享、截图或提交到公开仓库。留空时使用匿名模式。"
-  },
   "risk_cooldown_seconds": {
     "description": "触发 HTTP 412 后暂停请求的秒数",
     "type": "int",

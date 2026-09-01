@@ -4,7 +4,7 @@ from collections import OrderedDict
 from time import localtime, strftime
 from typing import Dict, List, Optional, Tuple, Union
 
-from aiohttp import ClientSession
+from curl_cffi.requests import AsyncSession
 from astrbot.api import logger
 
 from .errors import BiliRiskControlError, raise_for_risk_control_payload
@@ -47,7 +47,7 @@ def resize_image(src: str, is_cover: bool = False) -> str:
 
 
 async def bili_keyword(
-    group_id: Optional[str], text: str, session: ClientSession
+    group_id: Optional[str], text: str, session: AsyncSession
 ) -> Union[List[Union[List[str], str]], str]:
     try:
         # 提取url
@@ -87,7 +87,7 @@ async def bili_keyword(
     return msg
 
 
-async def b23_extract(text: str, session: ClientSession) -> str:
+async def b23_extract(text: str, session: AsyncSession) -> str:
     b23 = re.compile(
         r"b23\.tv/(\w+)|(bili(22|23|33|2233)\.cn)/(\w+)", re.I
     ).search(text.replace("\\", ""))
@@ -95,13 +95,12 @@ async def b23_extract(text: str, session: ClientSession) -> str:
         return text
 
     url = f"https://{b23[0]}"
-    async with session.get(url, allow_redirects=False) as resp:
-        if resp.status == 412:
-            raise BiliRiskControlError(str(resp.url))
-        if resp.status in (301, 302, 303, 307, 308):
-            return resp.headers.get("Location", text)
-        # 没有重定向则尝试跟随
-        return str(resp.url) if resp.status == 200 else text
+    resp = await session.get(url, allow_redirects=False)
+    if resp.status_code == 412:
+        raise BiliRiskControlError(str(resp.url))
+    if resp.status_code in (301, 302, 303, 307, 308):
+        return resp.headers.get("Location", text)
+    return str(resp.url) if resp.status_code == 200 else text
 
 
 def extract(text: str) -> Tuple[str, Optional[str], Optional[str]]:
@@ -140,9 +139,15 @@ def extract(text: str) -> Tuple[str, Optional[str], Optional[str]]:
             text
         )
         if bvid:
-            url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid[0]}"
+            url = (
+                "https://api.bilibili.com/x/web-interface/wbi/view"
+                f"?bvid={bvid[0]}"
+            )
         elif aid:
-            url = f"https://api.bilibili.com/x/web-interface/view?aid={aid[0][2:]}"
+            url = (
+                "https://api.bilibili.com/x/web-interface/wbi/view"
+                f"?aid={aid[0][2:]}"
+            )
         elif epid:
             url = f"https://bangumi.bilibili.com/view/web_api/season?ep_id={epid[0][2:]}"
         elif ssid:
@@ -166,33 +171,35 @@ def extract(text: str) -> Tuple[str, Optional[str], Optional[str]]:
 
 
 async def search_bili_by_title(
-    title: str, session: ClientSession
+    title: str, session: AsyncSession
 ) -> Optional[str]:
     # set headers
     mainsite_url = "https://www.bilibili.com"
-    async with session.get(mainsite_url) as resp:
-        if resp.status == 412:
-            raise BiliRiskControlError(str(resp.url))
-        if resp.status != 200:
-            logger.warning(
-                f"search_bili_by_title: mainsite returned HTTP {resp.status}"
-            )
-            return None
+    resp = await session.get(mainsite_url)
+    if resp.status_code == 412:
+        raise BiliRiskControlError(str(resp.url))
+    if resp.status_code != 200:
+        logger.warning(
+            "search_bili_by_title: mainsite returned HTTP "
+            f"{resp.status_code}"
+        )
+        return None
 
     query = await get_query({"keyword": title}, session=session)
     search_url = (
         f"https://api.bilibili.com/x/web-interface/wbi/search/all/v2?{query}"
     )
 
-    async with session.get(search_url) as resp:
-        if resp.status == 412:
-            raise BiliRiskControlError(str(resp.url))
-        if resp.status != 200:
-            logger.warning(
-                f"search_bili_by_title: search API returned HTTP {resp.status}"
-            )
-            return None
-        result = await resp.json()
+    resp = await session.get(search_url)
+    if resp.status_code == 412:
+        raise BiliRiskControlError(str(resp.url))
+    if resp.status_code != 200:
+        logger.warning(
+            "search_bili_by_title: search API returned HTTP "
+            f"{resp.status_code}"
+        )
+        return None
+    result = resp.json()
 
     raise_for_risk_control_payload(result, search_url)
 
@@ -254,19 +261,19 @@ def _apply_template(template: str, data: dict, cover_url: str) -> list:
 
 
 async def video_detail(
-    url: str, session: ClientSession, **kwargs
+    url: str, session: AsyncSession, **kwargs
 ) -> Tuple[List[str], str]:
     try:
-        async with session.get(url) as resp:
-            if resp.status == 412:
-                raise BiliRiskControlError(str(resp.url))
-            if resp.status != 200:
-                return f"视频请求失败: HTTP {resp.status}", url
-            payload = await resp.json()
-            raise_for_risk_control_payload(payload, url)
-            res = payload.get("data")
-            if not res:
-                return "解析到视频被删了/稿件不可见或审核中/权限不足", url
+        resp = await session.get(url)
+        if resp.status_code == 412:
+            raise BiliRiskControlError(str(resp.url))
+        if resp.status_code != 200:
+            return f"视频请求失败: HTTP {resp.status_code}", url
+        payload = resp.json()
+        raise_for_risk_control_payload(payload, url)
+        res = payload.get("data")
+        if not res:
+            return "解析到视频被删了/稿件不可见或审核中/权限不足", url
         vurl = f"https://www.bilibili.com/video/av{res['aid']}"
         title = f"\n标题：{res['title']}\n"
 
@@ -346,19 +353,19 @@ async def video_detail(
 async def bangumi_detail(
     url: str,
     time_location: Optional[re.Match],
-    session: ClientSession,
+    session: AsyncSession,
 ) -> Tuple[List[str], str]:
     try:
-        async with session.get(url) as resp:
-            if resp.status == 412:
-                raise BiliRiskControlError(str(resp.url))
-            if resp.status != 200:
-                return f"番剧请求失败: HTTP {resp.status}", None
-            payload = await resp.json()
-            raise_for_risk_control_payload(payload, url)
-            res = payload.get("result")
-            if not res:
-                return None, None
+        resp = await session.get(url)
+        if resp.status_code == 412:
+            raise BiliRiskControlError(str(resp.url))
+        if resp.status_code != 200:
+            return f"番剧请求失败: HTTP {resp.status_code}", None
+        payload = resp.json()
+        raise_for_risk_control_payload(payload, url)
+        res = payload.get("result")
+        if not res:
+            return None, None
 
         has_image = False
         if analysis_display_image or "bangumi" in analysis_display_image_list:
@@ -403,18 +410,18 @@ async def bangumi_detail(
 
 
 async def live_detail(
-    url: str, session: ClientSession
+    url: str, session: AsyncSession
 ) -> Tuple[List[str], str]:
     try:
-        async with session.get(url) as resp:
-            if resp.status == 412:
-                raise BiliRiskControlError(str(resp.url))
-            if resp.status != 200:
-                return f"直播间请求失败: HTTP {resp.status}", None
-            res = await resp.json()
-            raise_for_risk_control_payload(res, url)
-            if res["code"] != 0:
-                return None, None
+        resp = await session.get(url)
+        if resp.status_code == 412:
+            raise BiliRiskControlError(str(resp.url))
+        if resp.status_code != 200:
+            return f"直播间请求失败: HTTP {resp.status_code}", None
+        res = resp.json()
+        raise_for_risk_control_payload(res, url)
+        if res["code"] != 0:
+            return None, None
         res = res["data"]
         uname = res["anchor_info"]["base_info"]["uname"]
         room_id = res["room_info"]["room_id"]
@@ -475,19 +482,19 @@ async def live_detail(
 
 
 async def article_detail(
-    url: str, cvid: str, session: ClientSession
+    url: str, cvid: str, session: AsyncSession
 ) -> Tuple[List[Union[List[str], str]], str]:
     try:
-        async with session.get(url) as resp:
-            if resp.status == 412:
-                raise BiliRiskControlError(str(resp.url))
-            if resp.status != 200:
-                return f"专栏请求失败: HTTP {resp.status}", None
-            payload = await resp.json()
-            raise_for_risk_control_payload(payload, url)
-            res = payload.get("data")
-            if not res:
-                return None, None
+        resp = await session.get(url)
+        if resp.status_code == 412:
+            raise BiliRiskControlError(str(resp.url))
+        if resp.status_code != 200:
+            return f"专栏请求失败: HTTP {resp.status_code}", None
+        payload = resp.json()
+        raise_for_risk_control_payload(payload, url)
+        res = payload.get("data")
+        if not res:
+            return None, None
 
         has_image = False
         if analysis_display_image or "article" in analysis_display_image_list:
@@ -522,18 +529,18 @@ async def article_detail(
 
 
 async def dynamic_detail(
-    url: str, session: ClientSession
+    url: str, session: AsyncSession
 ) -> Tuple[List[Union[List[str], str]], str]:
     try:
-        async with session.get(url) as resp:
-            if resp.status == 412:
-                raise BiliRiskControlError(str(resp.url))
-            if resp.status != 200:
-                return f"动态请求失败: HTTP {resp.status}", None
-            res = await resp.json()
-            raise_for_risk_control_payload(res, url)
-            if res["code"] != 0:
-                return None, None
+        resp = await session.get(url)
+        if resp.status_code == 412:
+            raise BiliRiskControlError(str(resp.url))
+        if resp.status_code != 200:
+            return f"动态请求失败: HTTP {resp.status_code}", None
+        res = resp.json()
+        raise_for_risk_control_payload(res, url)
+        if res["code"] != 0:
+            return None, None
 
         data = res.get("data")
         if not data:

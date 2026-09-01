@@ -6,8 +6,8 @@
 
 _✨ bilibili小组件等转链的工具 ✨_
 
-> awslYui 维护的 HTTP 412 风控修复版。基于 chufeng 的原插件，新增可选
-> `SESSDATA`、匿名 Cookie 初始化、请求限流、412 冷却熔断，并完整显示视频简介。
+> awslYui 维护的 HTTP 412 风控修复版。基于 chufeng 的原插件，使用匿名浏览器
+> TLS/HTTP2 指纹请求、限流和 412 冷却熔断，并完整显示视频简介。全程不使用 Cookie。
 
 [![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.html)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
@@ -77,7 +77,6 @@ https://github.com/awslYui/astrbot_plugin_bili_resolver
 | `enable_auto_parse` | bool | `true` | 自动解析开关 |
 | `enable_search` | bool | `true` | `/搜视频` 指令开关 |
 | `enable_image` | bool | `true` | 回复中是否显示封面图 |
-| `bili_sessdata` | text | `` | 可选的 B 站 `SESSDATA`，建议使用专用小号 |
 | `risk_cooldown_seconds` | int | `1800` | 触发 HTTP 412 后暂停请求的秒数 |
 | `request_interval_seconds` | float | `1.5` | 两次解析请求的最小间隔 |
 | `group_whitelist_mode` | bool | `false` | 白名单模式（开启=仅列表中的群生效，关闭=黑名单模式） |
@@ -147,14 +146,15 @@ https://www.bilibili.com/video/av114556558967080
 
 - Python >= 3.10
 - AstrBot
-- aiohttp
+- curl_cffi >= 0.15.0
 
 ## HTTP 412 风控说明
 
-HTTP 412 表示请求被 B 站安全风控拒绝，不是 QQ 或 AstrBot 故障。本版本会在首次
-解析前初始化匿名 Cookie，并限制请求频率；一旦收到 412，会暂停后续请求，避免
-持续重试加重风控。
+HTTP 412 表示请求在到达业务接口前被 B 站安全风控拒绝，不是 QQ 或 AstrBot 故障。
+原插件使用的 `/x/web-interface/view` 视频详情入口已开始对部分匿名脚本请求直接返回
+412，而同一网络、同一 BV 使用 `/x/web-interface/wbi/view` 可正常返回。本版本将视频
+解析切换到匿名可用的 WBI 入口，并通过 `curl_cffi` 模拟一致的浏览器 TLS/JA3、HTTP/2
+与请求头指纹，并限制请求频率；一旦收到 412，会暂停后续请求，避免持续重试加重风控。
 
-匿名模式仍可能被限制。需要更高稳定性时，可在插件配置中填写 B 站 Cookie 里的
-`SESSDATA`。它等同账号登录凭据，请使用专用小号，不要将它写进源码、日志或公开
-Issue。已经被限制的服务器出口 IP 可能需要等待风控解除或更换网络后才能恢复。
+插件不读取、不保存、也不发送任何 B 站 Cookie；服务器通过 `Set-Cookie` 下发的匿名
+Cookie 也会被直接丢弃。
