@@ -1,10 +1,11 @@
 import re
 import json
+import asyncio
 import urllib.parse
+from contextlib import asynccontextmanager
 from pathlib import PurePosixPath
 from typing import List, Optional, Set, Union
 
-import aiohttp
 from aiohttp import ClientSession, ClientTimeout
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
@@ -13,6 +14,7 @@ import astrbot.api.message_components as Comp
 
 from . import analysis_bilibili
 from .analysis_bilibili import b23_extract, bili_keyword, search_bili_by_title
+from .errors import BiliRiskControlError
 
 TEMPLATE_PRESET_EMOJI = (
     "🎬 标题：${标题}\n"
@@ -26,10 +28,14 @@ TEMPLATE_PRESET_EMOJI = (
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36 Edg/116.0.1938.69"
+    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+    "Referer": "https://www.bilibili.com/",
+    "Accept-Language": "zh-CN,zh;q=0.9",
 }
 
 DEFAULT_TIMEOUT = ClientTimeout(total=15)
+DEFAULT_RISK_COOLDOWN_SECONDS = 30 * 60
+DEFAULT_REQUEST_INTERVAL_SECONDS = 1.5
 
 BILI_PATTERN = re.compile(
     r"(b23\.tv)|(bili(22|23|33|2233)\.cn)|(\.bilibili\.com)"
@@ -220,8 +226,8 @@ def _format_msg(msg_list: List[Union[List[str], str]]) -> list:
     "bilibili小组件等转链的工具,方便PC查看链接,"
     "因为之前用其他的转链总是被踢下线,所以自己写了个简单版的,"
     "从发布以来还没被踢下线",
-    "1.0.3",
-    "https://github.com/chufeng/astrbot_plugin_bili_resolver",
+    "1.1.0",
+    "https://github.com/awslYui/astrbot_plugin_bili_resolver",
 )
 class BilibiliAnalysis(Star):
 
@@ -230,6 +236,25 @@ class BilibiliAnalysis(Star):
         self.config = config
         self.trust_env = False
         self._session: Optional[ClientSession] = None
+        self._session_bootstrapped = False
+        self._bootstrap_lock = asyncio.Lock()
+        self._request_lock = asyncio.Lock()
+        self._last_request_at = 0.0
+        self._risk_control_until = 0.0
+
+        self.bili_sessdata = str(config.get("bili_sessdata", "")).strip()
+        self.risk_cooldown_seconds = max(
+            60,
+            int(config.get(
+                "risk_cooldown_seconds", DEFAULT_RISK_COOLDOWN_SECONDS
+            )),
+        )
+        self.request_interval_seconds = max(
+            0.5,
+            float(config.get(
+                "request_interval_seconds", DEFAULT_REQUEST_INTERVAL_SECONDS
+            )),
+        )
 
         # 功能开关
         self.enable_auto_parse = config.get("enable_auto_parse", True)
@@ -258,12 +283,77 @@ class BilibiliAnalysis(Star):
     async def _get_session(self) -> ClientSession:
         """懒初始化并复用 ClientSession"""
         if self._session is None or self._session.closed:
+            cookies = (
+                {"SESSDATA": self.bili_sessdata}
+                if self.bili_sessdata
+                else None
+            )
             self._session = ClientSession(
                 trust_env=self.trust_env,
                 headers=HEADERS,
+                cookies=cookies,
                 timeout=DEFAULT_TIMEOUT,
             )
         return self._session
+
+    async def _bootstrap_session(self, session: ClientSession) -> None:
+        """Visit the main site once so anonymous sessions receive cookies."""
+        if self._session_bootstrapped:
+            return
+        async with self._bootstrap_lock:
+            if self._session_bootstrapped:
+                return
+            async with session.get("https://www.bilibili.com/") as resp:
+                if resp.status == 412:
+                    raise BiliRiskControlError(str(resp.url))
+                await resp.read()
+                if resp.status >= 400:
+                    logger.warning(
+                        "Bilibili session bootstrap returned HTTP "
+                        f"{resp.status}"
+                    )
+            self._session_bootstrapped = True
+
+    def _risk_cooldown_remaining(self) -> int:
+        now = asyncio.get_running_loop().time()
+        return max(0, int(self._risk_control_until - now))
+
+    def _activate_risk_cooldown(self, error: BiliRiskControlError) -> None:
+        now = asyncio.get_running_loop().time()
+        self._risk_control_until = now + self.risk_cooldown_seconds
+        logger.warning(
+            "Bilibili HTTP 412 risk control triggered; pausing requests for "
+            f"{self.risk_cooldown_seconds} seconds. "
+            f"URL={error.url or 'unknown'}"
+        )
+
+    @asynccontextmanager
+    async def _request_slot(self):
+        """Serialize and pace Bilibili requests to reduce risk-control hits."""
+        async with self._request_lock:
+            loop = asyncio.get_running_loop()
+            delay = (
+                self.request_interval_seconds
+                - (loop.time() - self._last_request_at)
+            )
+            if delay > 0:
+                await asyncio.sleep(delay)
+            try:
+                yield
+            finally:
+                self._last_request_at = loop.time()
+
+    async def _resolve(self, group_id: Optional[str], text: str):
+        if self._risk_cooldown_remaining():
+            return None
+        async with self._request_slot():
+            session = await self._get_session()
+            await self._bootstrap_session(session)
+            if re.search(
+                r"(b23\.tv)|(bili(22|23|33|2233)\.cn)", text, re.I
+            ):
+                text = await b23_extract(text, session=session)
+            return await bili_keyword(group_id, text, session=session)
 
     def _check_group(self, group_id: str) -> bool:
         """检查群组是否允许使用。返回 True 表示允许。"""
@@ -315,14 +405,20 @@ class BilibiliAnalysis(Star):
         elif not text or not BILI_PATTERN.search(text):
             return
 
-        try:
-            session = await self._get_session()
-            if re.search(
-                r"(b23\.tv)|(bili(22|23|33|2233)\.cn)", text, re.I
-            ):
-                text = await b23_extract(text, session=session)
+        if self._risk_cooldown_remaining():
+            return
 
-            msg = await bili_keyword(group_id, text, session=session)
+        try:
+            msg = await self._resolve(group_id, text)
+        except BiliRiskControlError as e:
+            self._activate_risk_cooldown(e)
+            event.stop_event()
+            minutes = max(1, (self.risk_cooldown_seconds + 59) // 60)
+            yield event.plain_result(
+                f"B站触发安全风控（HTTP 412），已暂停解析约{minutes}分钟，"
+                "请稍后再试。"
+            )
+            return
         except Exception as e:
             logger.error(f"Bilibili 解析出错: {e!r}", exc_info=True)
             return
@@ -367,14 +463,35 @@ class BilibiliAnalysis(Star):
 
         event.stop_event()
 
-        try:
-            session = await self._get_session()
-            search_url = await search_bili_by_title(text, session=session)
-            if not search_url:
-                yield event.plain_result("未找到相关视频")
-                return
+        remaining = self._risk_cooldown_remaining()
+        if remaining:
+            minutes = max(1, (remaining + 59) // 60)
+            yield event.plain_result(
+                f"B站安全风控冷却中，请约 {minutes} 分钟后再试"
+            )
+            return
 
-            msg = await bili_keyword(group_id, search_url, session=session)
+        try:
+            async with self._request_slot():
+                session = await self._get_session()
+                await self._bootstrap_session(session)
+                search_url = await search_bili_by_title(
+                    text, session=session
+                )
+                if not search_url:
+                    yield event.plain_result("未找到相关视频")
+                    return
+
+                msg = await bili_keyword(
+                    group_id, search_url, session=session
+                )
+        except BiliRiskControlError as e:
+            self._activate_risk_cooldown(e)
+            yield event.plain_result(
+                "B站触发安全风控（HTTP 412），已暂停请求，"
+                "请稍后再试"
+            )
+            return
         except Exception as e:
             logger.error(f"Bilibili 搜索出错: {e!r}", exc_info=True)
             yield event.plain_result("搜索出错，请稍后再试")
@@ -398,3 +515,4 @@ class BilibiliAnalysis(Star):
         if self._session and not self._session.closed:
             await self._session.close()
             self._session = None
+        self._session_bootstrapped = False

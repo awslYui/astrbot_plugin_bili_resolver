@@ -6,6 +6,8 @@ from typing import Dict, Optional, Tuple
 
 from aiohttp import ClientSession
 
+from .errors import BiliRiskControlError, raise_for_risk_control_payload
+
 # doc: https://github.com/SocialSisterYi/bilibili-API-collect/blob/master/docs/misc/sign/wbi.md
 
 # fmt: off
@@ -70,11 +72,14 @@ async def get_wbi_keys(
             "https://api.bilibili.com/x/web-interface/nav",
             timeout=15,
         ) as resp:
+            if resp.status == 412:
+                raise BiliRiskControlError(str(resp.url))
             if resp.status != 200:
                 raise RuntimeError(
                     f"WBI nav request failed with status {resp.status}"
                 )
             json_content = await resp.json()
+            raise_for_risk_control_payload(json_content, str(resp.url))
     finally:
         if owns_session:
             await session.close()

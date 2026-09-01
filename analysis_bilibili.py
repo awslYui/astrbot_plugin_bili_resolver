@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple, Union
 from aiohttp import ClientSession
 from astrbot.api import logger
 
+from .errors import BiliRiskControlError, raise_for_risk_control_payload
 from .wbi import get_query
 
 
@@ -78,9 +79,11 @@ async def bili_keyword(
             if group_id in analysis_stat and analysis_stat[group_id] == vurl:
                 return ""
             analysis_stat[group_id] = vurl
+    except BiliRiskControlError:
+        raise
     except Exception as e:
         logger.error(f"bili_keyword Error: {e!r}", exc_info=True)
-        msg = f"bili_keyword Error: {e!r}"
+        msg = "B站解析失败，请稍后再试"
     return msg
 
 
@@ -93,6 +96,8 @@ async def b23_extract(text: str, session: ClientSession) -> str:
 
     url = f"https://{b23[0]}"
     async with session.get(url, allow_redirects=False) as resp:
+        if resp.status == 412:
+            raise BiliRiskControlError(str(resp.url))
         if resp.status in (301, 302, 303, 307, 308):
             return resp.headers.get("Location", text)
         # 没有重定向则尝试跟随
@@ -166,6 +171,8 @@ async def search_bili_by_title(
     # set headers
     mainsite_url = "https://www.bilibili.com"
     async with session.get(mainsite_url) as resp:
+        if resp.status == 412:
+            raise BiliRiskControlError(str(resp.url))
         if resp.status != 200:
             logger.warning(
                 f"search_bili_by_title: mainsite returned HTTP {resp.status}"
@@ -178,12 +185,16 @@ async def search_bili_by_title(
     )
 
     async with session.get(search_url) as resp:
+        if resp.status == 412:
+            raise BiliRiskControlError(str(resp.url))
         if resp.status != 200:
             logger.warning(
                 f"search_bili_by_title: search API returned HTTP {resp.status}"
             )
             return None
         result = await resp.json()
+
+    raise_for_risk_control_payload(result, search_url)
 
     code = result.get("code", -1)
     if code != 0:
@@ -224,14 +235,6 @@ def _format_duration(seconds: int) -> str:
     return f"{m}:{s:02d}"
 
 
-def _truncate_desc(desc: str, max_lines: int = 3) -> str:
-    """截断简介到最多 max_lines 行非空行"""
-    lines = [line for line in desc.split("\n") if line.strip()]
-    if len(lines) > max_lines:
-        return "\n".join(lines[:max_lines]) + "……"
-    return "\n".join(lines)
-
-
 def _apply_template(template: str, data: dict, cover_url: str) -> list:
     """将模板中的变量替换为实际值，${封面} 拆分为独立的图片元素"""
     result = template
@@ -255,9 +258,13 @@ async def video_detail(
 ) -> Tuple[List[str], str]:
     try:
         async with session.get(url) as resp:
+            if resp.status == 412:
+                raise BiliRiskControlError(str(resp.url))
             if resp.status != 200:
                 return f"视频请求失败: HTTP {resp.status}", url
-            res = (await resp.json()).get("data")
+            payload = await resp.json()
+            raise_for_risk_control_payload(payload, url)
+            res = payload.get("data")
             if not res:
                 return "解析到视频被删了/稿件不可见或审核中/权限不足", url
         vurl = f"https://www.bilibili.com/video/av{res['aid']}"
@@ -293,7 +300,7 @@ async def video_detail(
                 "标题": res["title"],
                 "UP主": res["owner"]["name"],
                 "UP主链接": f"https://space.bilibili.com/{res['owner']['mid']}",
-                "简介": _truncate_desc(res["desc"]),
+                "简介": res.get("desc") or "-",
                 "点赞": handle_num(res["stat"]["like"]),
                 "投币": handle_num(res["stat"]["coin"]),
                 "收藏": handle_num(res["stat"]["favorite"]),
@@ -325,20 +332,14 @@ async def video_detail(
             f"硬币：{handle_num(res['stat']['coin'])} | "
             f"评论：{handle_num(res['stat']['reply'])}\n"
         )
-        desc = f"\n简介：{res['desc']}"
-        desc_list = desc.split("\n")
-        desc = "".join(i + "\n" for i in desc_list if i)
-        desc_list = desc.split("\n")
-        if len(desc_list) > 4:
-            desc = (
-                desc_list[0] + "\n" + desc_list[1] + "\n"
-                + desc_list[2] + "……"
-            )
+        desc = f"\n简介：{res.get('desc') or '-'}\n"
         msg = [cover, vurl, title, tname, stat, desc]
         return msg, vurl
+    except BiliRiskControlError:
+        raise
     except Exception as e:
         logger.error(f"视频解析出错: {e!r}", exc_info=True)
-        msg = f"视频解析出错--Error: {e!r}"
+        msg = "视频解析出错，请稍后再试"
         return msg, None
 
 
@@ -349,9 +350,13 @@ async def bangumi_detail(
 ) -> Tuple[List[str], str]:
     try:
         async with session.get(url) as resp:
+            if resp.status == 412:
+                raise BiliRiskControlError(str(resp.url))
             if resp.status != 200:
                 return f"番剧请求失败: HTTP {resp.status}", None
-            res = (await resp.json()).get("result")
+            payload = await resp.json()
+            raise_for_risk_control_payload(payload, url)
+            res = payload.get("result")
             if not res:
                 return None, None
 
@@ -389,10 +394,11 @@ async def bangumi_detail(
         vurl = "\n" + vurl if cover else vurl
         msg = [cover, f"{vurl}\n", title, index_title, desc, style, evaluate]
         return msg, vurl
+    except BiliRiskControlError:
+        raise
     except Exception as e:
         logger.error(f"番剧解析出错: {e!r}", exc_info=True)
-        msg = f"番剧解析出错--Error: {e!r}"
-        msg += f"\n{url}"
+        msg = "番剧解析出错，请稍后再试"
         return msg, None
 
 
@@ -401,9 +407,12 @@ async def live_detail(
 ) -> Tuple[List[str], str]:
     try:
         async with session.get(url) as resp:
+            if resp.status == 412:
+                raise BiliRiskControlError(str(resp.url))
             if resp.status != 200:
                 return f"直播间请求失败: HTTP {resp.status}", None
             res = await resp.json()
+            raise_for_risk_control_payload(res, url)
             if res["code"] != 0:
                 return None, None
         res = res["data"]
@@ -457,9 +466,11 @@ async def live_detail(
         vurl = "\n" + vurl if cover else vurl
         msg = [cover, vurl, title, up, watch, tags, player]
         return msg, vurl
+    except BiliRiskControlError:
+        raise
     except Exception as e:
         logger.error(f"直播间解析出错: {e!r}", exc_info=True)
-        msg = f"直播间解析出错--Error: {e!r}"
+        msg = "直播间解析出错，请稍后再试"
         return msg, None
 
 
@@ -468,9 +479,13 @@ async def article_detail(
 ) -> Tuple[List[Union[List[str], str]], str]:
     try:
         async with session.get(url) as resp:
+            if resp.status == 412:
+                raise BiliRiskControlError(str(resp.url))
             if resp.status != 200:
                 return f"专栏请求失败: HTTP {resp.status}", None
-            res = (await resp.json()).get("data")
+            payload = await resp.json()
+            raise_for_risk_control_payload(payload, url)
+            res = payload.get("data")
             if not res:
                 return None, None
 
@@ -498,9 +513,11 @@ async def article_detail(
         desc = view + favorite + coin + "\n" + share + like + dislike + "\n"
         msg = [images, title, up, desc, vurl]
         return msg, vurl
+    except BiliRiskControlError:
+        raise
     except Exception as e:
         logger.error(f"专栏解析出错: {e!r}", exc_info=True)
-        msg = f"专栏解析出错--Error: {e!r}"
+        msg = "专栏解析出错，请稍后再试"
         return msg, None
 
 
@@ -509,9 +526,12 @@ async def dynamic_detail(
 ) -> Tuple[List[Union[List[str], str]], str]:
     try:
         async with session.get(url) as resp:
+            if resp.status == 412:
+                raise BiliRiskControlError(str(resp.url))
             if resp.status != 200:
                 return f"动态请求失败: HTTP {resp.status}", None
             res = await resp.json()
+            raise_for_risk_control_payload(res, url)
             if res["code"] != 0:
                 return None, None
 
@@ -598,7 +618,9 @@ async def dynamic_detail(
             f"\n动态链接：{vurl}",
         ]
         return msg, vurl
+    except BiliRiskControlError:
+        raise
     except Exception as e:
         logger.error(f"动态解析出错: {e!r}", exc_info=True)
-        msg = f"动态解析出错--Error: {e!r}"
+        msg = "动态解析出错，请稍后再试"
         return msg, None

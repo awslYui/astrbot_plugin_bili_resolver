@@ -6,6 +6,9 @@
 
 _✨ bilibili小组件等转链的工具 ✨_
 
+> awslYui 维护的 HTTP 412 风控修复版。基于 chufeng 的原插件，新增可选
+> `SESSDATA`、匿名 Cookie 初始化、请求限流、412 冷却熔断，并完整显示视频简介。
+
 [![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.html)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![AstrBot](https://img.shields.io/badge/AstrBot-4.0%2B-orange.svg)](https://github.com/Soulter/AstrBot)
@@ -55,7 +58,13 @@ https://www.bilibili.com/video/av114556558967080?p=1
 
 ## 安装
 
-**推荐**：在 AstrBot WebUI 的插件管理页面，搜索 `astrbot_plugin_bili_resolver` 一键安装。
+安装本修复版前，请先卸载原版 `astrbot_plugin_bili_resolver`，避免插件标识冲突。
+
+在 AstrBot WebUI 插件管理页面选择“从 GitHub 仓库安装”，填写：
+
+```text
+https://github.com/awslYui/astrbot_plugin_bili_resolver
+```
 
 手动安装：将插件目录放入 AstrBot 的 `data/plugins/` 目录下，重启或热重载即可。
 
@@ -68,9 +77,12 @@ https://www.bilibili.com/video/av114556558967080?p=1
 | `enable_auto_parse` | bool | `true` | 自动解析开关 |
 | `enable_search` | bool | `true` | `/搜视频` 指令开关 |
 | `enable_image` | bool | `true` | 回复中是否显示封面图 |
+| `bili_sessdata` | text | `` | 可选的 B 站 `SESSDATA`，建议使用专用小号 |
+| `risk_cooldown_seconds` | int | `1800` | 触发 HTTP 412 后暂停请求的秒数 |
+| `request_interval_seconds` | float | `1.5` | 两次解析请求的最小间隔 |
 | `group_whitelist_mode` | bool | `false` | 白名单模式（开启=仅列表中的群生效，关闭=黑名单模式） |
 | `group_list` | list | `[]` | 群组 ID 列表 |
-| `template_preset` | string | `简洁风格` | 视频解析排版风格，见下方说明 |
+| `template_preset` | string | `原始格式` | 视频解析排版风格，见下方说明 |
 | `video_template` | text | `` | 自定义排版模板，仅在 `template_preset` 为 `自定义` 时生效 |
 
 **白名单模式**：只有列表中的群触发，其他群忽略。
@@ -94,7 +106,7 @@ https://www.bilibili.com/video/av114556558967080
 简介：-
 ```
 
-**简洁风格**（默认）：带 Emoji 的卡片格式，同时附带封面图。
+**简洁风格**：带 Emoji 的卡片格式，同时附带封面图。
 
 ```
 🎬 标题：终于知道为什么听到某些歌，反派会愣住了
@@ -115,7 +127,7 @@ https://www.bilibili.com/video/av114556558967080
 | `${标题}` | 视频标题 |
 | `${UP主}` | UP 主名称 |
 | `${UP主链接}` | UP 主空间链接 |
-| `${简介}` | 视频简介（最多 3 行） |
+| `${简介}` | 完整视频简介 |
 | `${封面}` | 封面图（渲染为图片，受「显示封面」开关控制） |
 | `${点赞}` | 点赞数 |
 | `${投币}` | 投币数 |
@@ -136,3 +148,13 @@ https://www.bilibili.com/video/av114556558967080
 - Python >= 3.10
 - AstrBot
 - aiohttp
+
+## HTTP 412 风控说明
+
+HTTP 412 表示请求被 B 站安全风控拒绝，不是 QQ 或 AstrBot 故障。本版本会在首次
+解析前初始化匿名 Cookie，并限制请求频率；一旦收到 412，会暂停后续请求，避免
+持续重试加重风控。
+
+匿名模式仍可能被限制。需要更高稳定性时，可在插件配置中填写 B 站 Cookie 里的
+`SESSDATA`。它等同账号登录凭据，请使用专用小号，不要将它写进源码、日志或公开
+Issue。已经被限制的服务器出口 IP 可能需要等待风控解除或更换网络后才能恢复。
